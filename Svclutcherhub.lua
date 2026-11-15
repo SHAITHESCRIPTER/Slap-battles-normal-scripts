@@ -1,8 +1,5 @@
 --[[
-    SVCLUTCHER HUB :: SLAP BATTLES
-    Farm engine modelled on Nexer's slap farm (hidden platform + remote spam + anti-ragdoll + auto rejoin).
-    Badge tab with real badge IDs, owned-checking and a clickable scanner.
-
+    SVCLUTCHER HUB :: SLAP BATTLES  (gerepareerd)
     loadstring(game:HttpGet("YOUR_URL_HERE"))()
 ]]
 
@@ -30,9 +27,43 @@ if type(env.SVCLUTCHER_Cleanup) == "function" then
 	pcall(env.SVCLUTCHER_Cleanup)
 end
 
-local WindUI = loadstring(game:HttpGet(
-	"https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"
-))()
+-- ============================================================
+-- HTTP / UI LIB
+-- ============================================================
+local function httpGet(url)
+	if type(game.HttpGetAsync) == "function" then
+		local ok, res = pcall(game.HttpGetAsync, game, url)
+		if ok and type(res) == "string" then return res end
+	end
+	if type(game.HttpGet) == "function" then
+		local ok, res = pcall(game.HttpGet, game, url)
+		if ok and type(res) == "string" then return res end
+	end
+	if type(request) == "function" then
+		local ok, res = pcall(function()
+			local r = request({ Url = url, Method = "GET" })
+			return r and r.Body
+		end)
+		if ok and type(res) == "string" then return res end
+	end
+	return nil
+end
+
+local windSource = httpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua")
+if not windSource then
+	print("[SVCLUTCHER] WindUI kon niet gedownload worden (HTTP geblokkeerd?)")
+	return
+end
+local windChunk, windErr = (type(loadstring) == "function" and loadstring or load)(windSource)
+if not windChunk then
+	print("[SVCLUTCHER] WindUI compile-fout: " .. tostring(windErr))
+	return
+end
+local windOk, WindUI = pcall(windChunk)
+if not windOk or type(WindUI) ~= "table" then
+	print("[SVCLUTCHER] WindUI init mislukt: " .. tostring(WindUI))
+	return
+end
 
 local Muted = false
 local function Notify(title, text, dur)
@@ -103,13 +134,26 @@ local function moveRoot(root, cf)
 	root.CFrame = cf
 end
 
-local function remote(name)
-	local folder = RS:FindFirstChild("Remotes")
-	local r = folder and folder:FindFirstChild(name)
-	return (r and r:IsA("RemoteEvent")) and r or nil
+-- remote zoeken: exact, dan case-insensitive, dan substring, met cache
+local RemoteCache = {}
+local function slapRemote()
+	if RemoteCache.Slap and RemoteCache.Slap.Parent then return RemoteCache.Slap end
+	for _, name in ipairs({ "Slap", "slap", "SlapRemote", "SlapEvent" }) do
+		for _, obj in ipairs(RS:GetDescendants()) do
+			if obj:IsA("RemoteEvent") and norm(obj.Name) == norm(name) then
+				RemoteCache.Slap = obj
+				return obj
+			end
+		end
+	end
+	for _, obj in ipairs(RS:GetDescendants()) do
+		if obj:IsA("RemoteEvent") and norm(obj.Name):find("slap", 1, true) then
+			RemoteCache.Slap = obj
+			return obj
+		end
+	end
+	return nil
 end
-
-local function slapRemote() return remote("Slap") end
 
 local function validTarget(p)
 	if not p or p == player then return nil end
@@ -127,6 +171,14 @@ end
 -- ============================================================
 local Combat = { Hitbox = false, Size = 14, Visible = true, Saved = {}, Loop = nil, Aura = false, Range = 20, AuraThread = nil, AutoSlap = false, AutoThread = nil, LastSlap = 0 }
 
+local function restoreRoot(root, saved)
+	root.Size = saved.Size
+	root.Transparency = saved.Transparency
+	root.Color = saved.Color
+	root.Material = saved.Material
+	root.CanCollide = saved.CanCollide
+end
+
 local function applyHitbox(p)
 	local root = validTarget(p)
 	local saved = Combat.Saved[p]
@@ -134,17 +186,20 @@ local function applyHitbox(p)
 	if not root then
 		if saved then
 			local r = getRoot(p)
-			if r then
-				r.Size = saved.Size r.Transparency = saved.Transparency
-				r.Color = saved.Color r.Material = saved.Material r.CanCollide = saved.CanCollide
-			end
+			if r then restoreRoot(r, saved) end
 			Combat.Saved[p] = nil
 		end
 		return
 	end
 
 	if not saved then
-		Combat.Saved[p] = { Size = root.Size, Transparency = root.Transparency, Color = root.Color, Material = root.Material, CanCollide = root.CanCollide }
+		Combat.Saved[p] = {
+			Size = root.Size,
+			Transparency = root.Transparency,
+			Color = root.Color,
+			Material = root.Material,
+			CanCollide = root.CanCollide,
+		}
 	end
 
 	local s = Combat.Size
@@ -158,10 +213,7 @@ end
 local function resetHitbox(p)
 	local root = getRoot(p)
 	local saved = Combat.Saved[p]
-	if root and saved then
-		root.Size = saved.Size root.Transparency = saved.Transparency
-		root.Color = saved.Color root.Material = saved.Material root.CanCollide = saved.CanCollide
-	end
+	if root and saved then restoreRoot(root, saved) end
 	Combat.Saved[p] = nil
 end
 
@@ -211,9 +263,16 @@ end
 local function startAura()
 	if Combat.AuraThread then return end
 	Combat.AuraThread = task.spawn(function()
+		local warned = false
 		while Combat.Aura do
 			local r = slapRemote()
-			if r then
+			if not r then
+				if not warned then
+					warned = true
+					Notify("Slap Aura", "Slap remote niet gevonden.", 3)
+				end
+			else
+				warned = false
 				for _, p in ipairs(Players:GetPlayers()) do
 					local tr = canAura(p)
 					if tr then pcall(function() r:FireServer(tr) end) end
@@ -274,15 +333,21 @@ local function buildCage()
 	local root = getRoot(player)
 	if not root or not Anti.On then return end
 	local folder = Instance.new("Folder")
-	folder.Name = "Part"
+	folder.Name = "SVCCage"
 	folder.Parent = workspace
 	Anti.Folder = folder
 	local c, inner, thick = root.CFrame, 8, 40
 	local ow, oh, od = inner + thick * 2, inner + thick * 2, inner + thick * 2
 	local function part(rel, size)
 		local p = Instance.new("Part")
-		p.Name = "Part" p.Size = size p.CFrame = c * rel
-		p.Anchored = true p.CanCollide = true p.CanTouch = false p.CanQuery = false p.Transparency = 1
+		p.Name = "SVCCagePart"
+		p.Size = size
+		p.CFrame = c * rel
+		p.Anchored = true
+		p.CanCollide = true
+		p.CanTouch = false
+		p.CanQuery = false
+		p.Transparency = 1
 		p.Parent = folder
 	end
 	part(CFrame.new(0, -(inner / 2 + thick / 2), 0), Vector3.new(ow, thick, od))
@@ -334,7 +399,10 @@ local function setFly(state, silent)
 	Move.Fly = state == true
 	if Move.FlyConn then Move.FlyConn:Disconnect() Move.FlyConn = nil end
 	local root = getRoot(player)
-	if not root then return end
+	if not root then
+		if not silent then Notify("Fly", "Geen karakter.") end
+		return
+	end
 	if Move.Fly then
 		local bv = Instance.new("BodyVelocity")
 		bv.Name = "SVCFly"
@@ -345,7 +413,7 @@ local function setFly(state, silent)
 		local hum = getHum(player)
 		if hum then hum.PlatformStand = true end
 		Move.FlyConn = RunService.RenderStepped:Connect(function()
-			if not Move.Fly or not Move.FlyVel then return end
+			if not Move.Fly or not Move.FlyVel or not Move.FlyVel.Parent then return end
 			local cam = workspace.CurrentCamera
 			local dir = Vector3.zero
 			if UIS:IsKeyDown(Enum.KeyCode.W) then dir += cam.CFrame.LookVector end
@@ -375,12 +443,19 @@ local function setNoclip(state, silent)
 				if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
 			end
 		end)
+	else
+		local char = player.Character
+		if char then
+			for _, p in ipairs(char:GetDescendants()) do
+				if p:IsA("BasePart") then p.CanCollide = true end
+			end
+		end
 	end
 	if not silent then Notify("Noclip", state and "On." or "Off.") end
 end
 
 local function applySpeed(v)
-	Move.Speed = math.clamp(tonumber(v) or 16, 16, 500)
+	Move.Speed = math.clamp(tonumber(v) or 16, 8, 500)
 	local hum = getHum(player)
 	if hum then hum.WalkSpeed = Move.Speed end
 end
@@ -388,7 +463,10 @@ end
 local function applyJump(v)
 	Move.Jump = math.clamp(tonumber(v) or 50, 50, 500)
 	local hum = getHum(player)
-	if hum then hum.JumpPower = Move.Jump hum.UseJumpPower = true end
+	if hum then
+		hum.JumpPower = Move.Jump
+		hum.UseJumpPower = true
+	end
 end
 
 local function setAntiFling(state, silent)
@@ -414,9 +492,11 @@ local ESP = { On = false, Folder = nil, Rows = {} }
 
 local function espFolder()
 	if ESP.Folder and ESP.Folder.Parent then return ESP.Folder end
+	local parent = player:FindFirstChildOfClass("PlayerGui")
+	if not parent then return nil end
 	ESP.Folder = Instance.new("Folder")
-	ESP.Folder.Name = "Part"
-	ESP.Folder.Parent = player:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+	ESP.Folder.Name = "SVCEsp"
+	ESP.Folder.Parent = parent
 	return ESP.Folder
 end
 
@@ -432,11 +512,12 @@ local function buildESP(p)
 	if p == player then return end
 	clearESP(p)
 	local char = p.Character
-	local head = char and char:FindFirstChild("Head")
-	if not head then return end
+	if not char then return end
+	local head = char:FindFirstChild("Head")
+	local folder = espFolder()
+	if not head or not folder then return end
 
 	local hl = Instance.new("Highlight")
-	hl.Name = "Part"
 	hl.FillColor = Color3.fromRGB(0, 170, 255)
 	hl.OutlineColor = Color3.fromRGB(255, 255, 255)
 	hl.FillTransparency = 0.75
@@ -444,16 +525,14 @@ local function buildESP(p)
 	hl.Parent = char
 
 	local bb = Instance.new("BillboardGui")
-	bb.Name = "Part"
 	bb.Size = UDim2.fromOffset(300, 120)
 	bb.StudsOffset = Vector3.new(0, 5, 0)
 	bb.AlwaysOnTop = true
 	bb.MaxDistance = 5000
 	bb.Adornee = head
-	bb.Parent = espFolder()
+	bb.Parent = folder
 
 	local label = Instance.new("TextLabel")
-	label.Name = "Part"
 	label.Size = UDim2.fromScale(1, 1)
 	label.BackgroundTransparency = 1
 	label.Font = Enum.Font.GothamBlack
@@ -466,15 +545,22 @@ local function buildESP(p)
 
 	task.spawn(function()
 		while ESP.On and ESP.Rows[p] and bb.Parent do
+			local ch = p.Character
 			local lh = getHum(p)
-			if not lh or lh.Health <= 0 then clearESP(p) break end
+			if not ch or not lh or lh.Health <= 0 then
+				clearESP(p)
+				break
+			end
 			local slaps = "?"
 			local ls = p:FindFirstChild("leaderstats")
 			local s = ls and ls:FindFirstChild("Slaps")
 			if s then slaps = tostring(s.Value) end
 			local glove = "none"
-			for _, c in ipairs(p.Character:GetChildren()) do
-				if c:IsA("Tool") then glove = c.Name break end
+			for _, c in ipairs(ch:GetChildren()) do
+				if c:IsA("Tool") then
+					glove = c.Name
+					break
+				end
 			end
 			label.Text = '<font color="rgb(255,255,255)">' .. p.Name .. '</font>'
 				.. '\n<font color="rgb(80,255,120)">HP: ' .. math.floor(lh.Health) .. '</font>'
@@ -488,7 +574,6 @@ end
 local function setESP(state, silent)
 	ESP.On = state == true
 	if ESP.On then
-		espFolder()
 		for _, p in ipairs(Players:GetPlayers()) do buildESP(p) end
 	else
 		for p in pairs(ESP.Rows) do clearESP(p) end
@@ -500,24 +585,12 @@ end
 -- ============================================================
 -- SLAP FARM
 -- ============================================================
-local Farm = {
-	On = false,
-	Thread = nil,
-	Delay = 0.25,
-	Range = 0,
-	Platform = nil,
-	Glove = "",
-	Spm = 0,
-	Samples = {},
-	Watch = nil,
-	AutoRejoin = false,
-	RejoinConns = {},
-}
+local Farm = { On = false, Thread = nil, Delay = 0.25, Range = 0, Platform = nil, Glove = "", Spm = 0, Samples = {}, Watch = nil }
 
 local function farmPlatform()
 	if Farm.Platform and Farm.Platform.Parent then return Farm.Platform end
 	local p = Instance.new("Part")
-	p.Name = "Part"
+	p.Name = "SVCPlatform"
 	p.Size = Vector3.new(4000, 2, 4000)
 	p.Position = Vector3.new(0, -120, 0)
 	p.Anchored = true
@@ -550,7 +623,7 @@ end
 local function toPlatform()
 	local root = getRoot(player)
 	if not root then return end
-	local plat = farmPlatform()
+	farmPlatform()
 	moveRoot(root, CFrame.new(Vector3.new(0, -117, 0)))
 	task.wait(0.1)
 	local hum = getHum(player)
@@ -588,24 +661,27 @@ end
 
 local function startFarm()
 	if Farm.Thread then return end
+	if not slapRemote() then
+		Notify("Slap Farm", "Slap remote niet gevonden. Hub is mogelijk verouderd.", 4)
+	end
 	Farm.Thread = task.spawn(function()
 		setAnti(true, true)
 		setAntiFling(true, true)
 		toPlatform()
 
 		while Farm.On do
-			if not getRoot(player) then task.wait(0.5) end
 			local root = getRoot(player)
-			if root and root.Position.Y > -110 then toPlatform() end
+			if not root then
+				task.wait(0.5)
+			else
+				if root.Position.Y > -110 then toPlatform() end
+				equipGlove()
 
-			equipGlove()
-
-			local r = slapRemote()
-			if r and root then
-				for _, p in ipairs(Players:GetPlayers()) do
-					local tr = validTarget(p)
-					if tr then
-						if Farm.Range == 0 or (root.Position - tr.Position).Magnitude <= Farm.Range then
+				local r = slapRemote()
+				if r then
+					for _, p in ipairs(Players:GetPlayers()) do
+						local tr = validTarget(p)
+						if tr and (Farm.Range == 0 or (root.Position - tr.Position).Magnitude <= Farm.Range) then
 							pcall(function() r:FireServer(tr) end)
 						end
 					end
@@ -633,7 +709,7 @@ local function setFarm(state, silent)
 		if root then moveRoot(root, groundCFrame(root.Position, { player.Character })) end
 	end
 	if not silent then
-		Notify("Slap Farm", state and "Farming on the hidden platform." or "Stopped.")
+		Notify("Slap Farm", state and "Farming op het verborgen platform." or "Gestopt.")
 	end
 end
 
@@ -656,8 +732,9 @@ local function clearRejoin()
 end
 
 local function bestServer(place, random)
-	local ok, result = pcall(function()
-		local body = game:HttpGet("https://games.roblox.com/v1/games/" .. place .. "/servers/Public?sortOrder=Desc&limit=100")
+	local body = httpGet("https://games.roblox.com/v1/games/" .. place .. "/servers/Public?sortOrder=Desc&limit=100")
+	if not body then return nil end
+	local ok, job = pcall(function()
 		local data = Services.HttpService:JSONDecode(body)
 		local pool = {}
 		for _, s in ipairs(data.data or {}) do
@@ -666,16 +743,17 @@ local function bestServer(place, random)
 				table.insert(pool, s.id)
 			end
 		end
-		if random and #pool > 0 then return pool[math.random(1, #pool)] end
+		if #pool == 0 then return nil end
+		if random then return pool[math.random(1, #pool)] end
 		return pool[1]
 	end)
-	if ok and result then return result end
+	if ok and job then return job end
 	return nil
 end
 
 local function doRejoin(random)
 	local place = game.PlaceId
-	Notify("Rejoin", "Rejoining...")
+	Notify("Rejoin", "Bezig met rejoinen...")
 	local job = bestServer(place, random)
 	if job then
 		local ok = pcall(function()
@@ -694,11 +772,17 @@ local function setRejoin(state, silent)
 			local hum = char and char:FindFirstChildOfClass("Humanoid")
 			if not hum then return end
 			table.insert(Rejoin.Conns, hum.Died:Connect(function()
-				if Rejoin.On then task.wait(0.5) doRejoin(false) end
+				if Rejoin.On then
+					task.wait(0.5)
+					doRejoin(false)
+				end
 			end))
 		end
 		hook(player.Character)
-		table.insert(Rejoin.Conns, player.CharacterAdded:Connect(function(c) task.wait(0.3) if Rejoin.On then hook(c) end end))
+		table.insert(Rejoin.Conns, player.CharacterAdded:Connect(function(c)
+			task.wait(0.3)
+			if Rejoin.On then hook(c) end
+		end))
 		pcall(function()
 			table.insert(Rejoin.Conns, Services.GuiService.ErrorMessageChanged:Connect(function()
 				if Rejoin.On then doRejoin(false) end
@@ -904,17 +988,21 @@ end
 local function checkOne(name, id)
 	local res = hasBadge(id)
 	if res == nil then
-		Notify("Badge", "Rate limited, try again.", 2)
+		Notify("Badge", "Rate limited, probeer opnieuw.", 2)
 		return
 	end
 	Badges.Owned[id] = res
-	Notify(name, res and "Owned." or "Not owned.", 2.5)
+	Notify(name, res and "Owned." or "Niet owned.", 2.5)
 end
 
 local function checkAll()
-	if Badges.Scanning then return end
+	if Badges.Scanning then
+		Badges.Scanning = false
+		Notify("Badge check", "Gestopt.")
+		return
+	end
 	Badges.Scanning = true
-	Notify("Badge check", "Checking " .. #Badges.List .. " badges...", 3)
+	Notify("Badge check", "Bezig met " .. #Badges.List .. " badges...", 3)
 	task.spawn(function()
 		local count = 0
 		for _, entry in ipairs(Badges.List) do
@@ -927,7 +1015,7 @@ local function checkAll()
 			task.wait(0.12)
 		end
 		Badges.Scanning = false
-		Notify("Badge check", "Done. Owned: " .. count .. " / " .. #Badges.List, 5)
+		Notify("Badge check", "Klaar. Owned: " .. count .. " / " .. #Badges.List, 5)
 	end)
 end
 
@@ -950,12 +1038,26 @@ local function clickables(range)
 	return out
 end
 
+-- GEFIXT: '?' was ongeldige syntax en sloopte de hele compile
 local function fireCd(cd)
+	if not cd then return end
 	pcall(function()
 		if type(fireclickdetector) == "function" then
 			fireclickdetector(cd, 1)
-		else
-			cd:FireServer? and cd:FireServer()
+			return
+		end
+		if type(getconnections) == "function" then
+			local fired = false
+			for _, c in ipairs(getconnections(cd.MouseClick) or {}) do
+				if type(c.Fire) == "function" then
+					c:Fire()
+					fired = true
+				end
+			end
+			if fired then return end
+		end
+		if type(cd.FireServer) == "function" then
+			cd:FireServer()
 		end
 	end)
 end
@@ -963,10 +1065,10 @@ end
 local function scanClickables()
 	local found = clickables(Badges.ClickRange)
 	Badges.Found = found
-	Notify("Scanner", "Found " .. #found .. " clickables in range.", 3)
+	Notify("Scanner", #found .. " clickables in bereik.", 3)
 	for i = 1, math.min(#found, 6) do
 		local f = found[i]
-		print(string.format("[SVCLUTCHER] %s (%s) - %d studs", f.part:GetFullName(), f.part.Name, math.floor(f.dist)))
+		print(string.format("[SVCLUTCHER] %s - %d studs", f.part:GetFullName(), math.floor(f.dist)))
 	end
 	return found
 end
@@ -1002,7 +1104,10 @@ end
 -- ============================================================
 local function teleportTo(p)
 	local root, tr = getRoot(player), getRoot(p)
-	if not root or not tr then Notify("Teleport", "Unavailable.") return end
+	if not root or not tr then
+		Notify("Teleport", "Niet beschikbaar.")
+		return
+	end
 	moveRoot(root, groundCFrame(tr.Position, { player.Character, p.Character }))
 	local hum = getHum(player)
 	if hum then hum.PlatformStand = false end
@@ -1016,7 +1121,9 @@ local function nearestPlayer()
 		local tr = validTarget(p)
 		if tr then
 			local d = (root.Position - tr.Position).Magnitude
-			if d < dist then best, dist = p, d end
+			if d < dist then
+				best, dist = p, d
+			end
 		end
 	end
 	return best
@@ -1091,7 +1198,10 @@ end
 -- HOOKS
 -- ============================================================
 Players.PlayerAdded:Connect(function(p)
-	if ESP.On then task.wait(0.5) buildESP(p) end
+	if ESP.On then
+		task.wait(0.5)
+		buildESP(p)
+	end
 end)
 
 Players.PlayerRemoving:Connect(function(p)
@@ -1108,8 +1218,13 @@ player.CharacterAdded:Connect(function()
 		hum.JumpPower = Move.Jump
 		hum.UseJumpPower = true
 	end
-	if ESP.On then for _, p in ipairs(Players:GetPlayers()) do buildESP(p) end end
-	if Farm.On then task.wait(0.4) toPlatform() end
+	if ESP.On then
+		for _, p in ipairs(Players:GetPlayers()) do buildESP(p) end
+	end
+	if Farm.On then
+		task.wait(0.4)
+		toPlatform()
+	end
 end)
 
 -- ============================================================
@@ -1137,27 +1252,27 @@ local TabSafety = Window:Tab({ Title = "SAFETY", Icon = "shield" })
 local TabSettings = Window:Tab({ Title = "SETTINGS", Icon = "wrench" })
 
 -- COMBAT
-TabCombat:Toggle({ Title = "Expand Hitbox", Desc = "Neon cube on enemy roots", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setHitbox(v == true) end })
+TabCombat:Toggle({ Title = "Expand Hitbox", Desc = "Neon kubus op vijandelijke roots", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setHitbox(v == true) end })
 TabCombat:Slider({ Title = "Hitbox Size", Step = 1, Value = { Min = 10, Max = 25, Default = 14 }, Callback = function(v) setHitboxSize(v) end })
-TabCombat:Toggle({ Title = "Show Hitboxes", Desc = "Toggle cube visibility", Color = Color3.fromRGB(57, 255, 20), Value = true, Callback = function(v) setVisible(v == true) end })
-TabCombat:Toggle({ Title = "Slap Aura", Desc = "Spams Remotes.Slap in range", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAura(v == true) end })
+TabCombat:Toggle({ Title = "Show Hitboxes", Desc = "Zichtbaarheid van de kubus", Color = Color3.fromRGB(57, 255, 20), Value = true, Callback = function(v) setVisible(v == true) end })
+TabCombat:Toggle({ Title = "Slap Aura", Desc = "Spamt Remotes.Slap in bereik", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAura(v == true) end })
 TabCombat:Slider({ Title = "Aura Range", Step = 1, Value = { Min = 5, Max = 60, Default = 20 }, Callback = function(v) Combat.Range = math.clamp(v, 5, 60) end })
-TabCombat:Toggle({ Title = "Auto Slap", Desc = "Activates glove on contact", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAutoSlap(v == true) end })
+TabCombat:Toggle({ Title = "Auto Slap", Desc = "Activeert glove bij contact", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAutoSlap(v == true) end })
 TabCombat:Button({ Title = "Teleport to Nearest", Icon = "crosshair", Callback = function()
 	local p = nearestPlayer()
-	if p then teleportTo(p) else Notify("Teleport", "Nobody found.") end
+	if p then teleportTo(p) else Notify("Teleport", "Niemand gevonden.") end
 end })
 TabCombat:Button({ Title = "Teleport to Lowest HP", Icon = "heart-pulse", Callback = function()
 	local p = lowestPlayer()
-	if p then teleportTo(p) else Notify("Teleport", "Nobody found.") end
+	if p then teleportTo(p) else Notify("Teleport", "Niemand gevonden.") end
 end })
 
 -- FARM
-TabFarm:Toggle({ Title = "Slap Farm", Desc = "Hidden platform + full-server remote spam", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setFarm(v == true) end })
-TabFarm:Slider({ Title = "Tick Delay", Desc = "Lower = more slaps, more risk", Step = 0.05, Value = { Min = 0.05, Max = 1, Default = 0.25 }, Callback = setFarmDelay })
-TabFarm:Slider({ Title = "Range (0 = whole arena)", Step = 50, Value = { Min = 0, Max = 5000, Default = 0 }, Callback = setFarmRange })
-TabFarm:Textbox({ Title = "Auto-Equip Glove", Desc = "Exact glove name, blank to skip", Value = "", Callback = function(v) Farm.Glove = tostring(v or "") end })
-TabFarm:Toggle({ Title = "Auto Rejoin on Death", Desc = "Restarts the farm automatically", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setRejoin(v == true) end })
+TabFarm:Toggle({ Title = "Slap Farm", Desc = "Verborgen platform + remote spam", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setFarm(v == true) end })
+TabFarm:Slider({ Title = "Tick Delay", Desc = "Lager = meer slaps, meer risico", Step = 0.05, Value = { Min = 0.05, Max = 1, Default = 0.25 }, Callback = setFarmDelay })
+TabFarm:Slider({ Title = "Range (0 = hele arena)", Step = 50, Value = { Min = 0, Max = 5000, Default = 0 }, Callback = setFarmRange })
+TabFarm:Textbox({ Title = "Auto-Equip Glove", Desc = "Exacte glove-naam, leeg = overslaan", Value = "", Callback = function(v) Farm.Glove = tostring(v or "") end })
+TabFarm:Toggle({ Title = "Auto Rejoin on Death", Desc = "Herstart de farm automatisch", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setRejoin(v == true) end })
 TabFarm:Button({ Title = "Go to Platform", Icon = "arrow-down", Callback = function() toPlatform() end })
 TabFarm:Button({ Title = "Reset Position", Icon = "undo", Callback = function()
 	local root = getRoot(player)
@@ -1169,7 +1284,7 @@ local ownedLabel
 local badgeNames = {}
 for _, e in ipairs(Badges.List) do table.insert(badgeNames, e[1]) end
 
-TabBadges:Paragraph({ Title = "Badge Tracker", Desc = "Checks are rate-limited by Roblox, expect roughly one per 0.12s." })
+TabBadges:Paragraph({ Title = "Badge Tracker", Desc = "Roblox rate-limit checks, reken op ~1 per 0.12s." })
 ownedLabel = TabBadges:Paragraph({ Title = "Owned", Desc = "0 / " .. #Badges.List })
 
 local selectedBadge = nil
@@ -1183,20 +1298,23 @@ TabBadges:Dropdown({
 })
 
 TabBadges:Button({ Title = "Check Selected", Icon = "search", Callback = function()
-	if not selectedBadge then Notify("Badge", "Pick a badge first.") return end
+	if not selectedBadge then Notify("Badge", "Kies eerst een badge.") return end
 	for _, e in ipairs(Badges.List) do
-		if e[1] == selectedBadge then checkOne(e[1], e[2]) return end
+		if e[1] == selectedBadge then
+			checkOne(e[1], e[2])
+			return
+		end
 	end
 end })
 
-TabBadges:Button({ Title = "Check All", Icon = "list-checks", Callback = checkAll })
+TabBadges:Button({ Title = "Check All / Stop", Icon = "list-checks", Callback = checkAll })
 
 TabBadges:Button({ Title = "Open Selected On Roblox", Icon = "external-link", Callback = function()
-	if not selectedBadge then Notify("Badge", "Pick a badge first.") return end
+	if not selectedBadge then Notify("Badge", "Kies eerst een badge.") return end
 	for _, e in ipairs(Badges.List) do
 		if e[1] == selectedBadge then
 			pcall(function() setclipboard(badgeUrl(e[2])) end)
-			Notify("Badge", "Link copied: " .. e[1], 3)
+			Notify("Badge", "Link gekopieerd: " .. e[1], 3)
 			return
 		end
 	end
@@ -1204,13 +1322,13 @@ end })
 
 TabBadges:Textbox({ Title = "Check Custom Badge ID", Value = "", Callback = function(v)
 	local id = tonumber(v)
-	if not id then Notify("Badge", "Numbers only.") return end
+	if not id then Notify("Badge", "Alleen cijfers.") return end
 	checkOne("Badge " .. id, id)
 end })
 
 TabBadges:Slider({ Title = "Click Scan Range", Step = 25, Value = { Min = 50, Max = 1000, Default = 250 }, Callback = function(v) Badges.ClickRange = v end })
-TabBadges:Button({ Title = "Scan Clickables", Desc = "Lists nearby click detectors", Icon = "radar", Callback = scanClickables })
-TabBadges:Toggle({ Title = "Auto Click Nearest", Desc = "Teleports to and fires clickables", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAutoClick(v == true) end })
+TabBadges:Button({ Title = "Scan Clickables", Desc = "Toont click detectors in de buurt", Icon = "radar", Callback = scanClickables })
+TabBadges:Toggle({ Title = "Auto Click Nearest", Desc = "Teleporteert naar en klikt clickables", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAutoClick(v == true) end })
 
 task.spawn(function()
 	while ownedLabel do
@@ -1228,25 +1346,26 @@ TabMove:Toggle({ Title = "Infinite Jump", Color = Color3.fromRGB(57, 255, 20), V
 TabMove:Toggle({ Title = "Fly", Desc = "WASD + Space / LCTRL", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setFly(v == true) end })
 TabMove:Slider({ Title = "Fly Speed", Step = 5, Value = { Min = 10, Max = 300, Default = 60 }, Callback = function(v) Move.FlySpeed = v end })
 TabMove:Toggle({ Title = "Noclip", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setNoclip(v == true) end })
-TabMove:Slider({ Title = "Walk Speed", Step = 1, Value = { Min = 16, Max = 300, Default = 16 }, Callback = applySpeed })
+TabMove:Slider({ Title = "Walk Speed", Step = 1, Value = { Min = 8, Max = 300, Default = 16 }, Callback = applySpeed })
 TabMove:Slider({ Title = "Jump Power", Step = 1, Value = { Min = 50, Max = 300, Default = 50 }, Callback = applyJump })
 
 -- PLAYERS
-local PlayerListTab = TabPlayers:Section({ Title = "Players" })
+local PlayerListSection = TabPlayers:Section({ Title = "Players" })
+local playerButtons = {}
 
 local function rebuildPlayerList()
-	for _, c in ipairs(PlayerListTab:GetChildren()) do
-		pcall(function() c:Destroy() end)
-	end
+	for _, b in ipairs(playerButtons) do pcall(function() b:Destroy() end) end
+	playerButtons = {}
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= player then
 			local hum = getHum(p)
-			PlayerListTab:Button({
+			local btn = PlayerListSection:Button({
 				Title = p.Name,
 				Desc = hum and ("HP " .. math.floor(hum.Health)) or "",
 				Icon = "user",
 				Callback = function() teleportTo(p) end,
 			})
+			table.insert(playerButtons, btn)
 		end
 	end
 end
@@ -1254,7 +1373,7 @@ end
 TabPlayers:Button({ Title = "Refresh List", Icon = "refresh-cw", Callback = rebuildPlayerList })
 TabPlayers:Button({ Title = "Freeze Nearest", Icon = "snowflake", Callback = function()
 	local p = nearestPlayer()
-	if p then freeze(p) else Notify("Freeze", "Nobody found.") end
+	if p then freeze(p) else Notify("Freeze", "Niemand gevonden.") end
 end })
 TabPlayers:Button({ Title = "Unfreeze All", Icon = "sun", Callback = function()
 	for p, on in pairs(Frozen) do
@@ -1264,19 +1383,19 @@ TabPlayers:Button({ Title = "Unfreeze All", Icon = "sun", Callback = function()
 			Frozen[p] = nil
 		end
 	end
-	Notify("Freeze", "All released.")
+	Notify("Freeze", "Alles losgelaten.")
 end })
 rebuildPlayerList()
-Players.PlayerAdded:Connect(rebuildPlayerList)
-Players.PlayerRemoving:Connect(rebuildPlayerList)
+Players.PlayerAdded:Connect(function() task.wait(0.5) rebuildPlayerList() end)
+Players.PlayerRemoving:Connect(function() task.wait(0.2) rebuildPlayerList() end)
 
 -- VISUALS
-TabVisuals:Toggle({ Title = "Player ESP", Desc = "Name, HP, slaps, glove", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setESP(v == true) end })
-TabVisuals:Toggle({ Title = "Slap HUD", Desc = "Counter with farm rate", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setHUD(v == true) end })
+TabVisuals:Toggle({ Title = "Player ESP", Desc = "Naam, HP, slaps, glove", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setESP(v == true) end })
+TabVisuals:Toggle({ Title = "Slap HUD", Desc = "Teller met farm-snelheid", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setHUD(v == true) end })
 
 -- SAFETY
-TabSafety:Toggle({ Title = "Anti-Ragdoll", Desc = "Invisible cage on knockback", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAnti(v == true) end })
-TabSafety:Toggle({ Title = "Anti-Fling", Desc = "Clamps velocity spikes", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAntiFling(v == true) end })
+TabSafety:Toggle({ Title = "Anti-Ragdoll", Desc = "Onzichtbare kooi bij knockback", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAnti(v == true) end })
+TabSafety:Toggle({ Title = "Anti-Fling", Desc = "Klemt velocity-pieken af", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setAntiFling(v == true) end })
 TabSafety:Toggle({ Title = "Auto Rejoin", Color = Color3.fromRGB(57, 255, 20), Value = false, Callback = function(v) setRejoin(v == true) end })
 
 -- SETTINGS
@@ -1287,7 +1406,7 @@ TabSettings:Button({ Title = "Unload Hub", Icon = "trash-2", Callback = function
 	if type(env.SVCLUTCHER_Cleanup) == "function" then env.SVCLUTCHER_Cleanup() end
 end })
 
-Notify("SVCLUTCHER", "Loaded. Farm tab is the money maker.", 3)
+Notify("SVCLUTCHER", "Geladen. Farm-tab is de moneymaker.", 3)
 
 -- ============================================================
 -- CLEANUP
@@ -1306,9 +1425,10 @@ env.SVCLUTCHER_Cleanup = function()
 	pcall(function() setRejoin(false, true) end)
 	pcall(function() setAutoClick(false, true) end)
 	pcall(function() setHUD(false, true) end)
-	pcall(function() if Farm.Platform then Farm.Platform:Destroy() end end)
+	pcall(function() if Farm.Platform then Farm.Platform:Destroy() Farm.Platform = nil end end)
 	pcall(function() clearCage() end)
 	pcall(function() if Window and Window.Destroy then Window:Destroy() end end)
+	env.SVCLUTCHER_HUB = nil
 end
 
 env.SVCLUTCHER_HUB = { Window = Window, Farm = Farm, Badges = Badges, Notify = Notify }
